@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 intents = discord.Intents.default()
+intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -19,6 +20,17 @@ async def on_ready():
     )
 
     print(f"Logged in as {bot.user} ({bot.user.id})")
+
+
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
+
+    if "nigger" in message.content.lower():
+        await message.channel.send("yes")
+
+    await bot.process_commands(message)
 
 
 bot.run(os.getenv("TOKEN"))
