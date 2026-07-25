@@ -44,7 +44,7 @@ async def on_message(message):
             )
 
             await message.channel.send(
-                f"{message.author.mention} has been timed out for 1 minute."
+                f"{message.author.mention} dont say slurs"
             )
 
             break
