@@ -21,16 +21,17 @@ async def on_ready():
 
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
+slur_list = ["nigger", "faggot", "nigga"]
 
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
         return
-
-    if "nigger" in message.content.lower():
-        await message.channel.send("yes")
-
-    await bot.process_commands(message)
+    for slur in slur_list:
+        if slur in message.content.lower():
+            await message.channel.send("bad word")
+    
+        await bot.process_commands(message)
 
 
 bot.run(os.getenv("TOKEN"))
