@@ -1,4 +1,5 @@
 import os
+import datetime
 
 import discord
 from discord.ext import commands
@@ -8,6 +9,7 @@ load_dotenv()
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -21,17 +23,33 @@ async def on_ready():
 
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
+
 slur_list = ["nigger", "faggot", "nigga"]
+
 
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
         return
+
+    content = message.content.lower()
+
     for slur in slur_list:
-        if slur in message.content.lower():
-            await message.channel.send("bad word")
-    
-        await bot.process_commands(message)
+        if slur in content:
+            await message.delete()
+
+            await message.author.timeout(
+                datetime.timedelta(minutes=1),
+                reason="Used a banned word"
+            )
+
+            await message.channel.send(
+                f"{message.author.mention} has been timed out for 1 minute."
+            )
+
+            break
+
+    await bot.process_commands(message)
 
 
 bot.run(os.getenv("TOKEN"))
