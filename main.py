@@ -32,9 +32,11 @@ async def on_ready():
 
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
+async def on_member_join(member):
+    channel = bot.get_channel(1530727587989426336)
 
-slur_list = ["nigger", "faggot", "nigga", "fag"]
-
+    if channel:
+        await channel.send(f"welcome to necro's server {member.mention}")
 
 @bot.event
 async def on_message(message):
@@ -42,6 +44,8 @@ async def on_message(message):
         return
 
     content = message.content.lower()
+
+    slur_list = ["nigger", "faggot", "nigga", "fag"]
 
     for slur in slur_list:
         if slur in content:
@@ -62,6 +66,5 @@ async def on_message(message):
         await message.delete()
 
     await bot.process_commands(message)
-
 
 bot.run(os.getenv("TOKEN"))
