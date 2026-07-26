@@ -33,7 +33,7 @@ async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
 
-slur_list = ["nigger", "faggot", "nigga", "andre"]
+slur_list = ["nigger", "faggot", "nigga", "fag"]
 
 
 @bot.event
