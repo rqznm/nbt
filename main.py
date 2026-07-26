@@ -14,8 +14,9 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.command()
-async def hi(ctx, *, text: str):
-    await ctx.send(text)
+async def hi(ctx, *, text=None):
+    if text:
+        await ctx.send(text)
     await ctx.message.delete()
 
 @bot.event
