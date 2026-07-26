@@ -13,16 +13,12 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-@bot.command()
-async def hi(ctx, *, text: str):
-    await ctx.send(text)
-    await ctx.message.delete()
 
 @bot.event
 async def on_ready():
     await bot.change_presence(
         status=discord.Status.online,
-        activity=discord.Game("am i even fucking working? (1)")
+        activity=discord.Game("am i even fucking working? (2)")
     )
 
     print(f"Logged in as {bot.user} ({bot.user.id})")
@@ -38,22 +34,15 @@ async def on_message(message):
 
     content = message.content.lower()
 
+    if content:
+        await message.channel.send(message.content)
+        await message.delete()
+
     for slur in slur_list:
         if slur in content:
-            await message.delete()
-
             await message.author.timeout(
                 datetime.timedelta(minutes=1),
-                reason="Used a banned word"
-            )
-
-            await message.channel.send(
-                f"{message.author.mention} dont say slurs"
-            )
-
             break
-
-    await bot.process_commands(message)
 
 
 bot.run(os.getenv("TOKEN"))
