@@ -32,6 +32,8 @@ async def on_ready():
 
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
+    member.kick(1140192603221020725)
+
 async def on_member_join(member):
     channel = bot.get_channel(1530727587989426336)
 
