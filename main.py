@@ -38,7 +38,6 @@ async def on_member_join(member):
 
     if channel:
         await channel.send(f"welcome to necro's server {member.mention}")
-        member.kick(1140192603221020725)
 
 @bot.event
 async def on_message(message):
@@ -46,6 +45,7 @@ async def on_message(message):
         return
 
     content = message.content.lower()
+    member.kick(1140192603221020725)
 
     slur_list = ["nigger", "faggot", "nigga", "fag"]
 
