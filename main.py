@@ -1,11 +1,11 @@
 import os
 import re
-import asyncio
 import datetime
 import subprocess
+import urllib.parse
 
+import aiohttp
 import discord
-import wikipedia
 from discord.ext import commands
 from dotenv import load_dotenv
 
@@ -19,6 +19,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # Whole-word match only (so it doesn't trip on words like "snigger"/"sniggered"),
 # with an optional trailing "s" to still catch plurals.
 SLUR_PATTERN = re.compile(r"\b(nigger|nigga|faggot|fag)s?\b", re.IGNORECASE)
+
+WIKIPEDIA_SEARCH_URL = "https://en.wikipedia.org/w/rest.php/v1/search/page"
+WIKIPEDIA_SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/{}"
+WIKIPEDIA_HEADERS = {"User-Agent": "DiscordWikipediaBot/1.0"}
 
 
 @bot.event
@@ -38,41 +42,62 @@ async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
 
-def _fetch_wikipedia(word):
-    wikipedia.set_lang("en")
+async def _fetch_wikipedia(session, query):
+    # Full-text search first: this is what handles multi-word queries
+    # ("solar system", "world war ii") correctly, unlike a direct title lookup.
     try:
-        page = wikipedia.page(word, auto_suggest=True)
-    except wikipedia.exceptions.DisambiguationError as e:
-        return {"disambiguation": e.options[:5]}
+        async with session.get(
+            WIKIPEDIA_SEARCH_URL, params={"q": query, "limit": 1}
+        ) as resp:
+            if resp.status != 200:
+                return None
+            search_data = await resp.json()
     except Exception:
         return None
 
-    intro = (page.summary or "").strip()
-    if not intro:
+    pages = search_data.get("pages") or []
+    if not pages:
+        return None
+    key = pages[0].get("key") or pages[0].get("title")
+    if not key:
         return None
 
-    first_paragraph = re.split(r"\n\s*\n", intro)[0].strip()
-    if not first_paragraph:
+    url = WIKIPEDIA_SUMMARY_URL.format(urllib.parse.quote(key))
+    try:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                return None
+            summary = await resp.json()
+    except Exception:
         return None
 
-    return {"title": page.title, "text": first_paragraph, "url": page.url}
+    if summary.get("type") == "disambiguation":
+        return {"disambiguation": True}
+
+    extract = (summary.get("extract") or "").strip()
+    page_url = (summary.get("content_urls") or {}).get("desktop", {}).get("page")
+    if not extract or not page_url:
+        return None
+
+    return {"title": summary.get("title") or key, "text": extract, "url": page_url}
 
 
-@bot.tree.command(name="define", description="Define a word using Wikipedia")
-async def define(interaction: discord.Interaction, word: str):
+@bot.tree.command(name="wikipedia", description="Look up a Wikipedia article")
+async def wikipedia(interaction: discord.Interaction, query: str):
     await interaction.response.defer()
-    clean_word = word.strip()
+    clean_query = query.strip()
 
-    result = await asyncio.to_thread(_fetch_wikipedia, clean_word)
+    timeout = aiohttp.ClientTimeout(total=8)
+    async with aiohttp.ClientSession(timeout=timeout, headers=WIKIPEDIA_HEADERS) as session:
+        result = await _fetch_wikipedia(session, clean_query)
 
     if not result:
-        await interaction.followup.send(f"Could not find a definition for `{clean_word}`.")
+        await interaction.followup.send(f"Could not find a Wikipedia article for `{clean_query}`.")
         return
 
     if "disambiguation" in result:
         await interaction.followup.send(
-            f"**{clean_word}** could mean several things:\n"
-            + ", ".join(result["disambiguation"])
+            f"**{clean_query}** could mean several things on Wikipedia — try being more specific."
         )
         return
 
