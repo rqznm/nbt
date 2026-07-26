@@ -115,7 +115,7 @@ async def wikipedia(interaction: discord.Interaction, query: str):
 
 @bot.event
 async def on_member_join(member):
-    channel = bot.get_channel(1530727587989426336)
+    channel = bot.get_channel(1530934402589392987)
     if channel:
         await channel.send(
             f"welcome to necro's server {member.mention}"
