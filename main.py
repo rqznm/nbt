@@ -36,7 +36,7 @@ async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
 
-@bot.tree.command(name="define", description="Define a word using Wikipedia")
+@bot.tree.command(name="define", description="Define a word")
 async def define(interaction: discord.Interaction, word: str):
     await interaction.response.defer()
 
@@ -68,7 +68,7 @@ async def define(interaction: discord.Interaction, word: str):
         )
 
 
-@bot.tree.command(name="search", description="Search Google")
+@bot.tree.command(name="search", description="Search")
 async def search(interaction: discord.Interaction, query: str):
     encoded = urllib.parse.quote_plus(query)
 
@@ -124,8 +124,6 @@ async def on_message(message):
 
         await message.delete()
 
-
     await bot.process_commands(message)
-
 
 bot.run(os.getenv("TOKEN"))
