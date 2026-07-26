@@ -18,7 +18,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def on_ready():
     await bot.change_presence(
         status=discord.Status.online,
-        activity=discord.Game("(3)")
+        activity=discord.Game("(4)")
     )
 
     print(f"Logged in as {bot.user} ({bot.user.id})")
@@ -34,14 +34,25 @@ async def on_message(message):
 
     content = message.content.lower()
 
-    if content:
-        await message.channel.send(message.content)
-        await message.delete()
-
     for slur in slur_list:
         if slur in content:
+            await message.delete()
+
+            if message.author.guild_permissions.moderate_members:
+                return
+
             await message.author.timeout(datetime.timedelta(minutes=1))
-            break
+            return
+
+    if message.content.startswith("!"):
+        text = message.content[1:]
+        
+        if text:
+            await message.channel.send(text)
+
+        await message.delete()
+
+    await bot.process_commands(message)
 
 
 bot.run(os.getenv("TOKEN"))
