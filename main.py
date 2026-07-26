@@ -19,19 +19,6 @@ async def hi(ctx, *, text: str):
     await ctx.message.delete()
 
 @bot.event
-async def on_ready():
-    await bot.change_presence(
-        status=discord.Status.online,
-        activity=discord.Game("hihi")
-    )
-
-    print(f"Logged in as {bot.user} ({bot.user.id})")
-
-
-slur_list = ["nigger", "faggot", "nigga", "andre"]
-
-
-@bot.event
 async def on_message(message):
     if message.author == bot.user:
         return
@@ -40,16 +27,15 @@ async def on_message(message):
 
     for slur in slur_list:
         if slur in content:
-            await message.delete()
+            try:
+                await message.delete()
 
-            await message.author.timeout(
-                datetime.timedelta(minutes=1),
-                reason="Used a banned word"
-            )
+                await message.author.timeout(datetime.timedelta(minutes=1))
 
-            await message.channel.send(
-                f"{message.author.mention} dont say slurs"
-            )
+                await message.channel.send(f"{message.author.mention} dont say slurs")
+
+            except discord.Forbidden:
+                print("permission error")
 
             break
 
