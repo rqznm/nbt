@@ -45,7 +45,6 @@ async def on_message(message):
         return
 
     content = message.content.lower()
-    member.kick(1140192603221020725)
 
     slur_list = ["nigger", "faggot", "nigga", "fag"]
 
