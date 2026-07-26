@@ -19,8 +19,6 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-DICTIONARY_API_URL = "https://api.dictionaryapi.dev/api/v2/entries/en/{}"
-
 # Oxford Dictionaries API is not free — you need your own credentials from
 # https://developer.oxforddictionaries.com/ (sandbox tier is free but capped
 # at 500 calls). Leave these unset and the bot will just skip Oxford.
@@ -46,18 +44,6 @@ async def on_ready():
     )
     await bot.tree.sync()
     print(f"Logged in as {bot.user} ({bot.user.id})")
-
-
-async def _fetch_free_dictionary(session: aiohttp.ClientSession, word: str):
-    """Query api.dictionaryapi.dev. Returns parsed JSON list, or None."""
-    url = DICTIONARY_API_URL.format(urllib.parse.quote(word.lower()))
-    try:
-        async with session.get(url) as resp:
-            if resp.status == 200:
-                return await resp.json()
-    except Exception:
-        pass
-    return None
 
 
 async def _fetch_oxford(session: aiohttp.ClientSession, word: str):
@@ -95,49 +81,17 @@ def _fetch_wikipedia(word: str):
         return None
 
 
-def _add_free_dictionary_fields(embed: discord.Embed, data: list, limit: int = 3):
-    seen_pos = set()
-    synonyms = []
-    field_count = 0
-
-    for entry in data:
-        for meaning in entry.get("meanings", []):
-            pos = meaning.get("partOfSpeech", "unknown")
-            if pos in seen_pos or field_count >= limit:
-                continue
-            seen_pos.add(pos)
-            field_count += 1
-
-            lines = []
-            for i, d in enumerate(meaning.get("definitions", [])[:2], start=1):
-                line = f"{i}. {d['definition']}"
-                if d.get("example"):
-                    line += f"\n*e.g. {d['example']}*"
-                lines.append(line)
-                for syn in d.get("synonyms", [])[:3]:
-                    if syn not in synonyms:
-                        synonyms.append(syn)
-
-            embed.add_field(
-                name=f"\U0001F4D5 Free Dictionary — {pos.capitalize()}",
-                value="\n".join(lines),
-                inline=False,
-            )
-
-    if synonyms:
-        embed.add_field(name="Synonyms", value=", ".join(synonyms[:8]), inline=False)
-
-
-def _add_oxford_fields(embed: discord.Embed, data: dict, limit: int = 3):
-    """Parse Oxford Dictionaries API v2 'entries' response.
+def _format_oxford(data: dict, limit: int = 3) -> str:
+    """Parse Oxford Dictionaries API v2 'entries' response into a plain-text
+    block, one paragraph per part of speech.
     Note: written from Oxford's documented schema, not tested against a live
     key — double check field names once you have real credentials, in case
     Oxford has tweaked the response shape since."""
-    count = 0
+    blocks = []
     for result in data.get("results", []):
         for lex in result.get("lexicalEntries", []):
-            if count >= limit:
-                return
+            if len(blocks) >= limit:
+                return "\n\n".join(blocks)
             category = lex.get("lexicalCategory", {}).get("text", "Unknown")
             lines = []
             for entry in lex.get("entries", []):
@@ -146,15 +100,18 @@ def _add_oxford_fields(embed: discord.Embed, data: dict, limit: int = 3):
                         line = f"{len(lines) + 1}. {definition}"
                         examples = sense.get("examples", [])
                         if examples:
-                            line += f"\n*e.g. {examples[0].get('text', '')}*"
+                            line += f' (e.g. "{examples[0].get("text", "")}")'
                         lines.append(line)
             if lines:
-                embed.add_field(
-                    name=f"\U0001F4D8 Oxford — {category}",
-                    value="\n".join(lines),
-                    inline=False,
-                )
-                count += 1
+                blocks.append(f"**Oxford — {category}**\n" + "\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def _format_wikipedia(wiki_result: dict) -> str:
+    text = f"**Wikipedia**\n{wiki_result['summary']}"
+    if wiki_result.get("url"):
+        text += f"\n{wiki_result['url']}"
+    return text
 
 
 @bot.tree.command(name="define", description="Define a word using multiple dictionaries")
@@ -164,17 +121,12 @@ async def define(interaction: discord.Interaction, word: str):
 
     timeout = aiohttp.ClientTimeout(total=8)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        free_dict_data, oxford_data = await asyncio.gather(
-            _fetch_free_dictionary(session, clean_word),
-            _fetch_oxford(session, clean_word),
-        )
+        oxford_data = await _fetch_oxford(session, clean_word)
 
     wiki_result = await asyncio.to_thread(_fetch_wikipedia, clean_word)
-
-    have_dictionary_hit = bool(free_dict_data or oxford_data)
     have_wiki_summary = bool(wiki_result and "summary" in wiki_result)
 
-    if not have_dictionary_hit and not have_wiki_summary:
+    if not oxford_data and not have_wiki_summary:
         if wiki_result and "disambiguation" in wiki_result:
             await interaction.followup.send(
                 f"**{clean_word}** could mean several things:\n"
@@ -184,30 +136,28 @@ async def define(interaction: discord.Interaction, word: str):
             await interaction.followup.send(f"Could not find a definition for `{clean_word}`.")
         return
 
-    embed = discord.Embed(title=clean_word.capitalize(), color=discord.Color.blurple())
-
-    if free_dict_data:
-        _add_free_dictionary_fields(embed, free_dict_data)
+    parts = [f"**{clean_word.capitalize()}**"]
 
     if oxford_data:
-        _add_oxford_fields(embed, oxford_data)
+        oxford_text = _format_oxford(oxford_data)
+        if oxford_text:
+            parts.append(oxford_text)
 
     if have_wiki_summary:
-        value = wiki_result["summary"]
-        if wiki_result.get("url"):
-            value += f"\n[Read more]({wiki_result['url']})"
-        embed.add_field(name="\U0001F4D7 Wikipedia", value=value, inline=False)
+        parts.append(_format_wikipedia(wiki_result))
 
     sources = []
-    if free_dict_data:
-        sources.append("Free Dictionary API")
     if oxford_data:
         sources.append("Oxford Dictionaries API")
     if have_wiki_summary:
         sources.append("Wikipedia")
-    embed.set_footer(text="Sources: " + " · ".join(sources))
+    parts.append(f"*Sources: {', '.join(sources)}*")
 
-    await interaction.followup.send(embed=embed)
+    text = "\n\n".join(parts)
+    if len(text) > 1900:
+        text = text[:1897] + "..."
+
+    await interaction.followup.send(text)
 
 
 def _run_web_search(query: str, max_results: int):
