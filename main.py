@@ -1,5 +1,6 @@
 import os
 import datetime
+import subprocess
 
 import discord
 from discord.ext import commands
@@ -16,9 +17,17 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
+    try:
+        commits = subprocess.check_output(
+            ["git", "rev-list", "--count", "HEAD"],
+            text=True
+        ).strip()
+    except Exception:
+        commits = "?"
+
     await bot.change_presence(
         status=discord.Status.online,
-        activity=discord.Game("https://discord.gg/ky56g8ZRmu")
+        activity=discord.Game(f"version {commits}")
     )
 
     print(f"Logged in as {bot.user} ({bot.user.id})")
