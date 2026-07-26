@@ -18,7 +18,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def on_ready():
     await bot.change_presence(
         status=discord.Status.online,
-        activity=discord.Game("(4)")
+        activity=discord.Game("https://discord.gg/ky56g8ZRmu")
     )
 
     print(f"Logged in as {bot.user} ({bot.user.id})")
