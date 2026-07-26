@@ -32,13 +32,13 @@ async def on_ready():
 
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
-    member.kick(1140192603221020725)
-
+@bot.event
 async def on_member_join(member):
     channel = bot.get_channel(1530727587989426336)
 
     if channel:
         await channel.send(f"welcome to necro's server {member.mention}")
+        member.kick(1140192603221020725)
 
 @bot.event
 async def on_message(message):
