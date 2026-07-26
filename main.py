@@ -16,8 +16,6 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Whole-word match only (so it doesn't trip on words like "snigger"/"sniggered"),
-# with an optional trailing "s" to still catch plurals.
 SLUR_PATTERN = re.compile(r"\b(nigger|nigga|faggot|fag)s?\b", re.IGNORECASE)
 
 WIKIPEDIA_SEARCH_URL = "https://en.wikipedia.org/w/rest.php/v1/search/page"
@@ -43,8 +41,6 @@ async def on_ready():
 
 
 async def _fetch_wikipedia(session, query):
-    # Full-text search first: this is what handles multi-word queries
-    # ("solar system", "world war ii") correctly, unlike a direct title lookup.
     try:
         async with session.get(
             WIKIPEDIA_SEARCH_URL, params={"q": query, "limit": 1}
