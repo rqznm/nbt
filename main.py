@@ -1,15 +1,21 @@
+import logging
 import os
 import re
 import datetime
 import subprocess
 import urllib.parse
-
 import aiohttp
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("wikipedia_lookup")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -20,7 +26,9 @@ SLUR_PATTERN = re.compile(r"\b(nigger|nigga|faggot|fag)s?\b", re.IGNORECASE)
 
 WIKIPEDIA_SEARCH_URL = "https://en.wikipedia.org/w/rest.php/v1/search/page"
 WIKIPEDIA_SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/{}"
-WIKIPEDIA_HEADERS = {"User-Agent": "DiscordWikipediaBot/1.0"}
+WIKIPEDIA_HEADERS = {
+    "User-Agent": "DiscordWikipediaBot/1.0 (https://github.com/you/yourrepo; you@example.com)"
+}
 
 
 @bot.event
@@ -46,13 +54,17 @@ async def _fetch_wikipedia(session, query):
             WIKIPEDIA_SEARCH_URL, params={"q": query, "limit": 1}
         ) as resp:
             if resp.status != 200:
+                body = await resp.text()
+                logger.warning("search failed for %r: %s %s", query, resp.status, body[:300])
                 return None
             search_data = await resp.json()
     except Exception:
+        logger.exception("search request errored for %r", query)
         return None
 
     pages = search_data.get("pages") or []
     if not pages:
+        logger.warning("zero search results for %r", query)
         return None
     key = pages[0].get("key") or pages[0].get("title")
     if not key:
@@ -62,19 +74,21 @@ async def _fetch_wikipedia(session, query):
     try:
         async with session.get(url) as resp:
             if resp.status != 200:
+                body = await resp.text()
+                logger.warning("summary failed for %r: %s %s", key, resp.status, body[:300])
                 return None
             summary = await resp.json()
     except Exception:
+        logger.exception("summary request errored for %r", key)
         return None
 
     if summary.get("type") == "disambiguation":
         return {"disambiguation": True}
-
     extract = (summary.get("extract") or "").strip()
     page_url = (summary.get("content_urls") or {}).get("desktop", {}).get("page")
     if not extract or not page_url:
+        logger.warning("summary for %r missing extract/url (type=%s)", key, summary.get("type"))
         return None
-
     return {"title": summary.get("title") or key, "text": extract, "url": page_url}
 
 
@@ -82,25 +96,20 @@ async def _fetch_wikipedia(session, query):
 async def wikipedia(interaction: discord.Interaction, query: str):
     await interaction.response.defer()
     clean_query = query.strip()
-
     timeout = aiohttp.ClientTimeout(total=8)
     async with aiohttp.ClientSession(timeout=timeout, headers=WIKIPEDIA_HEADERS) as session:
         result = await _fetch_wikipedia(session, clean_query)
-
     if not result:
         await interaction.followup.send(f"Could not find a Wikipedia article for `{clean_query}`.")
         return
-
     if "disambiguation" in result:
         await interaction.followup.send(
             f"**{clean_query}** could mean several things on Wikipedia — try being more specific."
         )
         return
-
     text = f"**{result['title']}**\n{result['text']}\n{result['url']}"
     if len(text) > 1900:
         text = text[:1897] + "..."
-
     await interaction.followup.send(text)
 
 
