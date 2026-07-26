@@ -1,4 +1,6 @@
 import os
+import re
+import html
 import asyncio
 import datetime
 import subprocess
@@ -19,14 +21,8 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Oxford Dictionaries API is not free — you need your own credentials from
-# https://developer.oxforddictionaries.com/ (sandbox tier is free but capped
-# at 500 calls). Leave these unset and the bot will just skip Oxford.
-OXFORD_APP_ID = os.getenv("OXFORD_APP_ID")
-OXFORD_APP_KEY = os.getenv("OXFORD_APP_KEY")
-OXFORD_API_BASE = os.getenv(
-    "OXFORD_API_BASE", "https://od-api.oxforddictionaries.com/api/v2/entries/en-us/"
-)
+WIKTIONARY_API_URL = "https://en.wiktionary.org/api/rest_v1/page/definition/{}"
+GROKIPEDIA_URL = "https://grokipedia.com/page/{}"
 
 
 @bot.event
@@ -46,26 +42,48 @@ async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
 
-async def _fetch_oxford(session: aiohttp.ClientSession, word: str):
-    """Query the Oxford Dictionaries API. Returns parsed JSON, or None
-    (either because it's not configured, or the word wasn't found)."""
-    if not (OXFORD_APP_ID and OXFORD_APP_KEY):
-        return None
-    url = OXFORD_API_BASE + urllib.parse.quote(word.lower())
-    headers = {"app_id": OXFORD_APP_ID, "app_key": OXFORD_APP_KEY}
+def _strip_html(text):
+    return html.unescape(re.sub(r"<[^>]+>", "", text or "")).strip()
+
+
+async def _fetch_wiktionary(session, word):
+    url = WIKTIONARY_API_URL.format(urllib.parse.quote(word.lower()))
     try:
-        async with session.get(url, headers=headers) as resp:
+        async with session.get(url) as resp:
             if resp.status == 200:
-                return await resp.json()
+                data = await resp.json()
+                return data.get("en")
     except Exception:
         pass
     return None
 
 
-def _fetch_wikipedia(word: str):
-    """Blocking Wikipedia lookup — call via asyncio.to_thread.
-    Returns a dict with either {"summary", "url"} or {"disambiguation": [...]},
-    or None if nothing was found."""
+async def _fetch_grokipedia(session, word):
+    slug = urllib.parse.quote(word.strip().title().replace(" ", "_"))
+    url = GROKIPEDIA_URL.format(slug)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        async with session.get(url, headers=headers) as resp:
+            if resp.status != 200:
+                return None
+            raw = await resp.text()
+    except Exception:
+        return None
+
+    raw = re.sub(r"<script.*?</script>", "", raw, flags=re.S)
+    raw = re.sub(r"<style.*?</style>", "", raw, flags=re.S)
+    match = re.search(r"<h1[^>]*>.*?</h1>(.*?)(?:<h2|<table)", raw, re.S)
+    if not match:
+        return None
+    snippet = re.sub(r"\s+", " ", _strip_html(match.group(1))).strip()
+    if not snippet:
+        return None
+    if len(snippet) > 500:
+        snippet = snippet[:497] + "..."
+    return {"summary": snippet, "url": url}
+
+
+def _fetch_wikipedia(word):
     wikipedia.set_lang("en")
     try:
         summary = wikipedia.summary(word, sentences=2, auto_suggest=True)
@@ -81,36 +99,31 @@ def _fetch_wikipedia(word: str):
         return None
 
 
-def _format_oxford(data: dict, limit: int = 3) -> str:
-    """Parse Oxford Dictionaries API v2 'entries' response into a plain-text
-    block, one paragraph per part of speech.
-    Note: written from Oxford's documented schema, not tested against a live
-    key — double check field names once you have real credentials, in case
-    Oxford has tweaked the response shape since."""
+def _format_wiktionary(entries, limit=3):
     blocks = []
-    for result in data.get("results", []):
-        for lex in result.get("lexicalEntries", []):
-            if len(blocks) >= limit:
-                return "\n\n".join(blocks)
-            category = lex.get("lexicalCategory", {}).get("text", "Unknown")
-            lines = []
-            for entry in lex.get("entries", []):
-                for sense in entry.get("senses", [])[:2]:
-                    for definition in sense.get("definitions", [])[:1]:
-                        line = f"{len(lines) + 1}. {definition}"
-                        examples = sense.get("examples", [])
-                        if examples:
-                            line += f' (e.g. "{examples[0].get("text", "")}")'
-                        lines.append(line)
-            if lines:
-                blocks.append(f"**Oxford — {category}**\n" + "\n".join(lines))
+    for entry in entries[:limit]:
+        pos = entry.get("partOfSpeech", "Unknown")
+        lines = []
+        for i, d in enumerate(entry.get("definitions", [])[:2], start=1):
+            definition = _strip_html(d.get("definition", ""))
+            if not definition:
+                continue
+            line = f"{i}. {definition}"
+            examples = d.get("parsedExamples") or []
+            if examples:
+                example_text = _strip_html(examples[0].get("example", ""))
+                if example_text:
+                    line += f' (e.g. "{example_text}")'
+            lines.append(line)
+        if lines:
+            blocks.append(f"**Wiktionary — {pos}**\n" + "\n".join(lines))
     return "\n\n".join(blocks)
 
 
-def _format_wikipedia(wiki_result: dict) -> str:
-    text = f"**Wikipedia**\n{wiki_result['summary']}"
-    if wiki_result.get("url"):
-        text += f"\n{wiki_result['url']}"
+def _format_source_summary(label, result):
+    text = f"**{label}**\n{result['summary']}"
+    if result.get("url"):
+        text += f"\n{result['url']}"
     return text
 
 
@@ -121,12 +134,15 @@ async def define(interaction: discord.Interaction, word: str):
 
     timeout = aiohttp.ClientTimeout(total=8)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        oxford_data = await _fetch_oxford(session, clean_word)
+        wiktionary_entries, grokipedia_result = await asyncio.gather(
+            _fetch_wiktionary(session, clean_word),
+            _fetch_grokipedia(session, clean_word),
+        )
 
     wiki_result = await asyncio.to_thread(_fetch_wikipedia, clean_word)
     have_wiki_summary = bool(wiki_result and "summary" in wiki_result)
 
-    if not oxford_data and not have_wiki_summary:
+    if not wiktionary_entries and not grokipedia_result and not have_wiki_summary:
         if wiki_result and "disambiguation" in wiki_result:
             await interaction.followup.send(
                 f"**{clean_word}** could mean several things:\n"
@@ -138,19 +154,24 @@ async def define(interaction: discord.Interaction, word: str):
 
     parts = [f"**{clean_word.capitalize()}**"]
 
-    if oxford_data:
-        oxford_text = _format_oxford(oxford_data)
-        if oxford_text:
-            parts.append(oxford_text)
+    if wiktionary_entries:
+        wikt_text = _format_wiktionary(wiktionary_entries)
+        if wikt_text:
+            parts.append(wikt_text)
 
     if have_wiki_summary:
-        parts.append(_format_wikipedia(wiki_result))
+        parts.append(_format_source_summary("Wikipedia", wiki_result))
+
+    if grokipedia_result:
+        parts.append(_format_source_summary("Grokipedia", grokipedia_result))
 
     sources = []
-    if oxford_data:
-        sources.append("Oxford Dictionaries API")
+    if wiktionary_entries:
+        sources.append("Wiktionary")
     if have_wiki_summary:
         sources.append("Wikipedia")
+    if grokipedia_result:
+        sources.append("Grokipedia")
     parts.append(f"*Sources: {', '.join(sources)}*")
 
     text = "\n\n".join(parts)
@@ -160,7 +181,7 @@ async def define(interaction: discord.Interaction, word: str):
     await interaction.followup.send(text)
 
 
-def _run_web_search(query: str, max_results: int):
+def _run_web_search(query, max_results):
     with DDGS() as ddgs:
         return list(ddgs.text(query, max_results=max_results))
 
@@ -183,22 +204,25 @@ async def search(
         await interaction.followup.send(f"No results found for **{query}**.")
         return
 
-    embed = discord.Embed(
-        title=f"Search results for \u201c{query}\u201d",
-        color=discord.Color.blurple(),
-    )
+    lines = [f"**Search results for \u201c{query}\u201d**"]
     for i, hit in enumerate(hits, start=1):
         title = hit.get("title") or "Untitled"
-        if len(title) > 100:
-            title = title[:97] + "..."
         href = hit.get("href") or ""
         body = (hit.get("body") or "").strip()
         if len(body) > 220:
             body = body[:217].rsplit(" ", 1)[0] + "..."
-        value = f"{body}\n{href}" if body else href
-        embed.add_field(name=f"{i}. {title}", value=value or "\u200b", inline=False)
-    embed.set_footer(text="Results via DuckDuckGo")
-    await interaction.followup.send(embed=embed)
+        entry = f"{i}. **{title}**"
+        if body:
+            entry += f"\n{body}"
+        if href:
+            entry += f"\n{href}"
+        lines.append(entry)
+
+    text = "\n\n".join(lines)
+    if len(text) > 1900:
+        text = text[:1897] + "..."
+
+    await interaction.followup.send(text)
 
 
 @bot.event
