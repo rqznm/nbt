@@ -60,6 +60,7 @@ async def on_ready():
             member_counter_service,
         )
         bot.add_view(settings_panel.view)
+        await bot.load_extension("commands")
         await bot.tree.sync()
         auto_delete_service.start()
         member_counter_service.start()
