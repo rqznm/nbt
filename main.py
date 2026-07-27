@@ -99,6 +99,11 @@ async def on_voice_state_update(
 
 
 @bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    await sticky_reaction_channel_service.handle_reaction_add(payload)
+
+
+@bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
