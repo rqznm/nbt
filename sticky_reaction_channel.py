@@ -21,7 +21,7 @@ logger = logging.getLogger("necro_bot")
 
 STICKY_CHANNEL_ID = 1531394477602636087
 
-STICKY_MESSAGE_TEXT = "React with how you feel"
+STICKY_MESSAGE_TEXT = "Rate porn by reacting to it"
 
 # Applied to every surviving message, in this exact order.
 REACTION_EMOJIS = [
