@@ -484,7 +484,7 @@ class WelcomeModal(SettingsModal, title="Welcome Settings"):
         await interaction.followup.send("Welcome settings updated.", ephemeral=True)
 
 
-class SuggestionModal(SettingsModal, title="Suggestion"):
+class SuggestionModal(Settings Modal, title="Suggestion"):
     suggestion = discord.ui.TextInput(
         label="Suggestion",
         placeholder="Type your suggestion here.",
