@@ -31,7 +31,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("role-enforcer")
 
 TARGET_ROLE_ID = 1531106256977268976  # the role to keep on top
-TOKEN = os.environ["DISCORD_TOKEN"]   # set this in your environment
+TOKEN = os.environ["TOKEN"]   # set this in your environment
 
 intents = discord.Intents.default()
 intents.guilds = True  # role create/update/delete events
