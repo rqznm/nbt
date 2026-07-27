@@ -132,7 +132,7 @@ class ModerationCommands(commands.Cog):
                     f"Reason: {reason}"
                 )
             except discord.Forbidden:
-                pass  # Member has DMs disabled; proceed anyway.
+                pass
 
             await member.kick(reason=f"{reason} (by {interaction.user})")
         except discord.Forbidden:
