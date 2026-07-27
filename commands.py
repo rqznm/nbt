@@ -60,10 +60,6 @@ class ModerationCommands(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Tracks scheduled unban tasks so temporary bans can be lifted.
-        # NOTE: this is in-memory only. If the bot restarts, pending
-        # temporary bans will no longer be auto-lifted; consider persisting
-        # (e.g. via SettingsStore) if that matters for your use case.
         self._pending_unbans: dict[tuple[int, int], asyncio.Task] = {}
 
     async def cog_unload(self):

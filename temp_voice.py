@@ -10,8 +10,6 @@ logger = logging.getLogger("necro_bot")
 HUB_CHANNEL_ID = 1530935069819146431
 DASHBOARD_CHANNEL_ID = 1531106553627934850
 
-# Used to find and reuse the dashboard message across bot restarts, instead
-# of spamming a new one into the channel every time the bot starts up.
 _DASHBOARD_MARKER = "temp-voice-dashboard"
 
 
@@ -51,9 +49,6 @@ class TempVoiceService:
         await self._ensure_dashboard_message()
         await self._refresh_dashboard()
 
-    # ------------------------------------------------------------------
-    # Event entry point — hook this up to the bot's on_voice_state_update.
-    # ------------------------------------------------------------------
     async def on_voice_state_update(
         self,
         member: discord.Member,
@@ -78,9 +73,6 @@ class TempVoiceService:
         if relevant:
             await self._refresh_dashboard()
 
-    # ------------------------------------------------------------------
-    # Channel lookups
-    # ------------------------------------------------------------------
     def _hub_channel(self) -> discord.VoiceChannel | None:
         channel = self.bot.get_channel(self.hub_channel_id)
         return channel if isinstance(channel, discord.VoiceChannel) else None
@@ -89,9 +81,6 @@ class TempVoiceService:
         channel = self.bot.get_channel(self.dashboard_channel_id)
         return channel if isinstance(channel, discord.TextChannel) else None
 
-    # ------------------------------------------------------------------
-    # Create / delete temp channels
-    # ------------------------------------------------------------------
     async def _create_temp_channel(self, member: discord.Member):
         hub = self._hub_channel()
         if hub is None:
@@ -101,8 +90,6 @@ class TempVoiceService:
         guild = hub.guild
         name = f"{member.display_name}'s VC"[:100]
 
-        # Copy the hub's permission overwrites so the temp channel behaves
-        # the same way visibility/access-wise, then layer on owner control.
         overwrites = {
             target: discord.PermissionOverwrite.from_pair(*ow.pair())
             for target, ow in hub.overwrites.items()
@@ -128,9 +115,6 @@ class TempVoiceService:
             return
 
         try:
-            # Put the new channel at the top of the category's channel list
-            # (rather than wherever Discord defaults new channels to) so the
-            # most recently created temp VC is always easy to spot.
             await temp_channel.move(beginning=True, category=hub.category)
         except discord.HTTPException:
             logger.exception(
@@ -166,9 +150,6 @@ class TempVoiceService:
                 logger.exception("Failed to delete temp VC %s", channel_id)
         await self._refresh_dashboard()
 
-    # ------------------------------------------------------------------
-    # Dashboard
-    # ------------------------------------------------------------------
     async def _ensure_dashboard_message(self):
         channel = self._dashboard_channel()
         if channel is None:

@@ -17,7 +17,6 @@ from settings_store import (
 
 logger = logging.getLogger("settings_panel")
 
-
 def _truncate(value: str, limit: int = 1024) -> str:
     if len(value) <= limit:
         return value
