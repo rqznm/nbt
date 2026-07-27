@@ -51,7 +51,7 @@ async def on_ready():
         commits = "?"
 
     await bot.change_presence(
-        status=discord.Status.online,
+        status=discord.Status.dnd,
         activity=discord.Game(f"version {commits}"),
     )
 
