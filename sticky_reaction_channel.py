@@ -21,7 +21,7 @@ logger = logging.getLogger("necro_bot")
 
 STICKY_CHANNEL_ID = 1531394477602636087
 
-STICKY_MESSAGE_TEXT = "Rate porn by reacting to it"
+STICKY_MESSAGE_TEXT = "React to a message to rate it!"
 
 # Applied to every surviving message, in this exact order.
 REACTION_EMOJIS = [
@@ -86,11 +86,11 @@ class StickyReactionChannelService:
     async def ensure_initial_sticky(self) -> None:
         """Call once on startup.
 
-        Cleans up any sticky messages left over from a previous run (only
-        ever exact-match text the bot itself sent) and posts a fresh one, so
-        the channel never ends up with duplicates after a restart even if no
-        new message gets posted right away. This never touches messages from
-        anyone other than the bot.
+        Just posts a fresh sticky message. Does not read or touch anything
+        already in the channel -- no history scan, no deletions of existing
+        messages. If a sticky from a previous run is still sitting there,
+        it's left alone; only messages sent *after* this point are managed
+        by _resend_sticky below.
         """
         channel = self.bot.get_channel(STICKY_CHANNEL_ID)
         if channel is None:
@@ -101,16 +101,7 @@ class StickyReactionChannelService:
                 return
 
         async with self._lock:
-            await self._purge_old_stickies(channel)
             self._sticky_message = await channel.send(STICKY_MESSAGE_TEXT)
-
-    async def _purge_old_stickies(self, channel: discord.abc.Messageable) -> None:
-        async for old_message in channel.history(limit=50):
-            if (
-                old_message.author.id == self.bot.user.id
-                and old_message.content == STICKY_MESSAGE_TEXT
-            ):
-                await self._delete(old_message)
 
     async def _react_in_order(self, message: discord.Message) -> None:
         for emoji in REACTION_EMOJIS:
