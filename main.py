@@ -13,6 +13,7 @@ from member_counter import MemberCounterService
 from settings_channel_guard import delete_non_bot_settings_message
 from settings_panel import SettingsPanel
 from settings_store import SettingsStore
+from temp_voice import TempVoiceService
 from welcome import send_welcome
 
 
@@ -32,6 +33,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 settings_store = SettingsStore()
 auto_delete_service = AutoDeleteService(bot, settings_store)
 member_counter_service = MemberCounterService(bot, settings_store)
+temp_voice_service = TempVoiceService(bot)
 settings_panel: SettingsPanel | None = None
 bootstrapped = False
 
@@ -66,6 +68,7 @@ async def on_ready():
         member_counter_service.start()
         await settings_panel.ensure_panel()
         await member_counter_service.update_all()
+        await temp_voice_service.start()
         bootstrapped = True
 
     logger.info("Logged in as %s (%s)", bot.user, bot.user.id)
@@ -80,6 +83,15 @@ async def on_member_join(member: discord.Member):
 @bot.event
 async def on_member_remove(member: discord.Member):
     await member_counter_service.update_guild(member.guild)
+
+
+@bot.event
+async def on_voice_state_update(
+    member: discord.Member,
+    before: discord.VoiceState,
+    after: discord.VoiceState,
+):
+    await temp_voice_service.on_voice_state_update(member, before, after)
 
 
 @bot.event
