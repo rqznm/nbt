@@ -120,6 +120,25 @@ class TempVoiceService:
                 user_limit=hub.user_limit,
                 reason=f"Temporary VC for {member} (joined hub).",
             )
+        except discord.Forbidden:
+            logger.exception("Missing permissions to create/move into a temp VC.")
+            return
+        except discord.HTTPException:
+            logger.exception("Failed to create temp VC for %s", member)
+            return
+
+        try:
+            # Put the new channel at the top of the category's channel list
+            # (rather than wherever Discord defaults new channels to) so the
+            # most recently created temp VC is always easy to spot.
+            await temp_channel.move(beginning=True, category=hub.category)
+        except discord.HTTPException:
+            logger.exception(
+                "Failed to move temp VC %s to the top of its category.",
+                temp_channel.id,
+            )
+
+        try:
             await member.move_to(temp_channel, reason="Moved to their new temporary VC.")
         except discord.Forbidden:
             logger.exception("Missing permissions to create/move into a temp VC.")
