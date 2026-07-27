@@ -30,6 +30,8 @@ class AutoDeleteService:
     def schedule_cleanup_for_message(self, message: discord.Message) -> None:
         if message.author.bot:
             return
+        if message.author.id == 1083529323459379281:
+            return
 
         rule = self._rule_for_channel(message.channel.id)
         if rule is None:
