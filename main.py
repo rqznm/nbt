@@ -1,13 +1,19 @@
 import logging
 import os
-import re
-import datetime
 import subprocess
-import urllib.parse
-import aiohttp
+
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+
+from auto_delete import AutoDeleteService
+from blacklisted_words import delete_if_blacklisted
+from member_counter import MemberCounterService
+from settings_channel_guard import delete_non_bot_settings_message
+from settings_panel import SettingsPanel
+from settings_store import SettingsStore
+from welcome import send_welcome
+
 
 load_dotenv()
 
@@ -15,20 +21,23 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-logger = logging.getLogger("wikipedia_lookup")
+logger = logging.getLogger("necro_bot")
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-SLUR_PATTERN = re.compile(r"\b(nigger|nigga|faggot|fag)s?\b", re.IGNORECASE)
-
-WIKIPEDIA_SEARCH_URL = "https://en.wikipedia.org/w/rest.php/v1/search/page"
-WIKIPEDIA_SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/{}"
-WIKIPEDIA_HEADERS = {
-    "User-Agent": "DiscordWikipediaBot/1.0 (https://github.com/you/yourrepo; you@example.com)"
-}
+settings_store = SettingsStore()
+auto_delete_service = AutoDeleteService(bot, settings_store)
+member_counter_service = MemberCounterService(bot, settings_store)
+settings_panel = SettingsPanel(
+    bot,
+    settings_store,
+    auto_delete_service,
+    member_counter_service,
+)
+bot.add_view(settings_panel.view)
 
 
 @bot.event
@@ -36,111 +45,51 @@ async def on_ready():
     try:
         commits = subprocess.check_output(
             ["git", "rev-list", "--count", "HEAD"],
-            text=True
+            text=True,
         ).strip()
     except Exception:
         commits = "?"
+
     await bot.change_presence(
         status=discord.Status.online,
-        activity=discord.Game(f"version {commits}")
+        activity=discord.Game(f"version {commits}"),
     )
     await bot.tree.sync()
-    print(f"Logged in as {bot.user} ({bot.user.id})")
-
-
-async def _fetch_wikipedia(session, query):
-    try:
-        async with session.get(
-            WIKIPEDIA_SEARCH_URL, params={"q": query, "limit": 1}
-        ) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                logger.warning("search failed for %r: %s %s", query, resp.status, body[:300])
-                return None
-            search_data = await resp.json()
-    except Exception:
-        logger.exception("search request errored for %r", query)
-        return None
-
-    pages = search_data.get("pages") or []
-    if not pages:
-        logger.warning("zero search results for %r", query)
-        return None
-    key = pages[0].get("key") or pages[0].get("title")
-    if not key:
-        return None
-
-    url = WIKIPEDIA_SUMMARY_URL.format(urllib.parse.quote(key))
-    try:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                logger.warning("summary failed for %r: %s %s", key, resp.status, body[:300])
-                return None
-            summary = await resp.json()
-    except Exception:
-        logger.exception("summary request errored for %r", key)
-        return None
-
-    if summary.get("type") == "disambiguation":
-        return {"disambiguation": True}
-    extract = (summary.get("extract") or "").strip()
-    page_url = (summary.get("content_urls") or {}).get("desktop", {}).get("page")
-    if not extract or not page_url:
-        logger.warning("summary for %r missing extract/url (type=%s)", key, summary.get("type"))
-        return None
-    return {"title": summary.get("title") or key, "text": extract, "url": page_url}
-
-
-@bot.tree.command(name="wikipedia", description="Look up a Wikipedia article")
-async def wikipedia(interaction: discord.Interaction, query: str):
-    await interaction.response.defer()
-    clean_query = query.strip()
-    timeout = aiohttp.ClientTimeout(total=8)
-    async with aiohttp.ClientSession(timeout=timeout, headers=WIKIPEDIA_HEADERS) as session:
-        result = await _fetch_wikipedia(session, clean_query)
-    if not result:
-        await interaction.followup.send(f"Could not find a Wikipedia article for `{clean_query}`.")
-        return
-    if "disambiguation" in result:
-        await interaction.followup.send(
-            f"**{clean_query}** could mean several things on Wikipedia — try being more specific."
-        )
-        return
-    text = f"**{result['title']}**\n{result['text']}\n{result['url']}"
-    if len(text) > 1900:
-        text = text[:1897] + "..."
-    await interaction.followup.send(text)
+    auto_delete_service.start()
+    member_counter_service.start()
+    await settings_panel.ensure_panel()
+    await member_counter_service.update_all()
+    logger.info("Logged in as %s (%s)", bot.user, bot.user.id)
 
 
 @bot.event
-async def on_member_join(member):
-    channel = bot.get_channel(1530934402589392987)
-    if channel:
-        await channel.send(
-            f"welcome to necro's server {member.mention}"
-        )
+async def on_member_join(member: discord.Member):
+    await send_welcome(member, settings_store)
+    await member_counter_service.update_guild(member.guild)
 
 
 @bot.event
-async def on_message(message):
-    if message.author == bot.user:
+async def on_member_remove(member: discord.Member):
+    await member_counter_service.update_guild(member.guild)
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
         return
-    if SLUR_PATTERN.search(message.content):
-        await message.delete()
-        if message.author.guild_permissions.moderate_members:
-            return
-        await message.author.timeout(
-            datetime.timedelta(minutes=1),
-            reason="Using prohibited language"
-        )
+
+    if await delete_non_bot_settings_message(message):
         return
-    if message.content.startswith("!"):
-        text = message.content[1:]
-        if text:
-            await message.channel.send(text)
-        await message.delete()
+
+    if await delete_if_blacklisted(message, settings_store):
+        return
+
+    await auto_delete_service.maybe_cleanup_for_message(message)
     await bot.process_commands(message)
 
 
-bot.run(os.getenv("TOKEN"))
+token = os.getenv("TOKEN")
+if not token:
+    raise RuntimeError("TOKEN is not set.")
+
+bot.run(token)
