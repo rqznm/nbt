@@ -2,10 +2,12 @@ import logging
 
 import discord
 
+from suggestions import clean_suggestion, save_suggestion
 from settings_store import (
     MANAGER_ROLE_ID,
     SETTINGS_CHANNEL_ID,
     SettingsStore,
+    normalize_keyword,
     normalize_time_value,
     parse_amount_value,
     parse_blacklisted_words,
@@ -25,6 +27,17 @@ def _truncate(value: str, limit: int = 1024) -> str:
 def _code(value: object) -> str:
     cleaned = str(value).replace("`", "'")
     return f"`{cleaned}`"
+
+
+async def _send_error_response(interaction: discord.Interaction) -> None:
+    message = "Something went wrong while handling that setting. Check the bot logs for details."
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.HTTPException:
+        logger.exception("Failed to send settings error response.")
 
 
 class SettingsPanel:
@@ -113,11 +126,12 @@ class SettingsPanel:
     def build_embed(self) -> discord.Embed:
         embed = discord.Embed(
             title="Bot Settings",
-            description=f"Only <@&{MANAGER_ROLE_ID}> can change these values. Human messages in this channel are deleted.",
-            color=discord.Color.dark_teal(),
+            description=f"Only <@&{MANAGER_ROLE_ID}> can change settings. Suggestions are stored privately.",
+            color=discord.Color.blurple(),
         )
         embed.add_field(name="Auto-delete", value=self._format_auto_delete_rules(), inline=False)
         embed.add_field(name="Blacklisted Words", value=self._format_blacklisted_words(), inline=False)
+        embed.add_field(name="Auto-respond", value=self._format_auto_responses(), inline=False)
         embed.add_field(name="Member Counter", value=self._format_member_counter(), inline=False)
         embed.add_field(name="Welcome", value=self._format_welcome(), inline=False)
         return embed
@@ -143,6 +157,18 @@ class SettingsPanel:
             return "No blacklisted words set."
         return _truncate(", ".join(_code(discord.utils.escape_mentions(word)) for word in words))
 
+    def _format_auto_responses(self) -> str:
+        rules = self.store.auto_responses()
+        if not rules:
+            return "No auto-responses set."
+
+        lines = []
+        for index, rule in enumerate(rules, start=1):
+            keyword = discord.utils.escape_mentions(str(rule.get("keyword", "")))
+            response = discord.utils.escape_mentions(str(rule.get("response", "")))
+            lines.append(f"{index}. {_code(keyword)} -> {_code(response)}")
+        return _truncate("\n".join(lines))
+
     def _format_member_counter(self) -> str:
         settings = self.store.member_counter()
         category_id = settings.get("category_id")
@@ -165,6 +191,19 @@ class SettingsView(discord.ui.View):
         super().__init__(timeout=None)
         self.panel = panel
 
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item: discord.ui.Item,
+    ) -> None:
+        logger.error(
+            "Settings button %s failed.",
+            getattr(item, "custom_id", "unknown"),
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        await _send_error_response(interaction)
+
     @discord.ui.button(
         label="Auto-delete",
         style=discord.ButtonStyle.primary,
@@ -181,7 +220,7 @@ class SettingsView(discord.ui.View):
 
     @discord.ui.button(
         label="Blacklist",
-        style=discord.ButtonStyle.secondary,
+        style=discord.ButtonStyle.primary,
         custom_id="necro_settings:blacklist",
     )
     async def blacklist_button(
@@ -194,8 +233,22 @@ class SettingsView(discord.ui.View):
         await interaction.response.send_modal(BlacklistModal(self.panel))
 
     @discord.ui.button(
+        label="Auto-respond",
+        style=discord.ButtonStyle.primary,
+        custom_id="necro_settings:auto_respond",
+    )
+    async def auto_respond_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if not await self.panel.require_manager(interaction):
+            return
+        await interaction.response.send_modal(AutoResponseModal(self.panel))
+
+    @discord.ui.button(
         label="Member Counter",
-        style=discord.ButtonStyle.secondary,
+        style=discord.ButtonStyle.primary,
         custom_id="necro_settings:member_counter",
     )
     async def member_counter_button(
@@ -209,7 +262,7 @@ class SettingsView(discord.ui.View):
 
     @discord.ui.button(
         label="Welcome",
-        style=discord.ButtonStyle.secondary,
+        style=discord.ButtonStyle.primary,
         custom_id="necro_settings:welcome",
     )
     async def welcome_button(
@@ -221,8 +274,30 @@ class SettingsView(discord.ui.View):
             return
         await interaction.response.send_modal(WelcomeModal(self.panel))
 
+    @discord.ui.button(
+        label="Suggestions",
+        style=discord.ButtonStyle.primary,
+        custom_id="necro_settings:suggestion",
+    )
+    async def suggestion_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.send_modal(SuggestionModal(self.panel))
 
-class AutoDeleteModal(discord.ui.Modal, title="Auto-delete Settings"):
+
+class SettingsModal(discord.ui.Modal):
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        logger.error(
+            "Settings modal %s failed.",
+            self.__class__.__name__,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        await _send_error_response(interaction)
+
+
+class AutoDeleteModal(SettingsModal, title="Auto-delete Settings"):
     channel_id = discord.ui.TextInput(
         label="Channel ID",
         placeholder="1531073727112941688",
@@ -260,7 +335,7 @@ class AutoDeleteModal(discord.ui.Modal, title="Auto-delete Settings"):
         await self.panel.refresh_after_update(interaction.guild)
 
         if result == "saved":
-            await self.panel.auto_delete_service.cleanup_rule(
+            self.panel.auto_delete_service.schedule_cleanup_rule(
                 {"channel_id": channel_id, "time": time_value, "amount": amount}
             )
             action = "saved"
@@ -269,7 +344,7 @@ class AutoDeleteModal(discord.ui.Modal, title="Auto-delete Settings"):
         await interaction.followup.send(f"Auto-delete rule {action} for <#{channel_id}>.", ephemeral=True)
 
 
-class BlacklistModal(discord.ui.Modal, title="Blacklisted Words"):
+class BlacklistModal(SettingsModal, title="Blacklisted Words"):
     words = discord.ui.TextInput(
         label="Words",
         placeholder="Separate words with commas or new lines.",
@@ -291,7 +366,40 @@ class BlacklistModal(discord.ui.Modal, title="Blacklisted Words"):
         await interaction.followup.send("Blacklisted words updated.", ephemeral=True)
 
 
-class MemberCounterModal(discord.ui.Modal, title="Member Counter"):
+class AutoResponseModal(SettingsModal, title="Keyword Auto-response"):
+    keyword = discord.ui.TextInput(
+        label="Keyword",
+        placeholder="Example: rules",
+        required=True,
+        max_length=100,
+    )
+    response = discord.ui.TextInput(
+        label="Response",
+        placeholder="Blank response removes this keyword.",
+        style=discord.TextStyle.long,
+        required=False,
+        max_length=1800,
+    )
+
+    def __init__(self, panel: SettingsPanel):
+        super().__init__()
+        self.panel = panel
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            keyword = normalize_keyword(str(self.keyword.value))
+            response = str(self.response.value)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        result = self.panel.store.upsert_auto_response(keyword, response)
+        await self.panel.refresh_after_update(interaction.guild)
+        await interaction.followup.send(f"Auto-response {result} for `{keyword}`.", ephemeral=True)
+
+
+class MemberCounterModal(SettingsModal, title="Member Counter"):
     category_id = discord.ui.TextInput(
         label="Category ID",
         placeholder="Blank disables the member counter.",
@@ -334,7 +442,7 @@ class MemberCounterModal(discord.ui.Modal, title="Member Counter"):
         await interaction.followup.send("Member counter updated.", ephemeral=True)
 
 
-class WelcomeModal(discord.ui.Modal, title="Welcome Settings"):
+class WelcomeModal(SettingsModal, title="Welcome Settings"):
     channel_id = discord.ui.TextInput(
         label="Welcome Channel ID",
         placeholder="Blank disables welcome messages.",
@@ -374,3 +482,28 @@ class WelcomeModal(discord.ui.Modal, title="Welcome Settings"):
         self.panel.store.set_welcome(channel_id, message)
         await self.panel.refresh_after_update(interaction.guild)
         await interaction.followup.send("Welcome settings updated.", ephemeral=True)
+
+
+class SuggestionModal(SettingsModal, title="Suggestion"):
+    suggestion = discord.ui.TextInput(
+        label="Suggestion",
+        placeholder="Type your suggestion here.",
+        style=discord.TextStyle.long,
+        required=True,
+        max_length=1800,
+    )
+
+    def __init__(self, panel: SettingsPanel):
+        super().__init__()
+        self.panel = panel
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            suggestion = clean_suggestion(str(self.suggestion.value))
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        save_suggestion(interaction, self.panel.store, suggestion)
+        await interaction.followup.send("Suggestion saved.", ephemeral=True)

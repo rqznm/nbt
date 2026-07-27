@@ -8,6 +8,8 @@ from settings_store import SettingsStore
 
 
 logger = logging.getLogger("blacklisted_words")
+_pattern_cache_key: tuple[str, ...] = ()
+_pattern_cache: re.Pattern[str] | None = None
 
 
 def _word_pattern(word: str) -> str:
@@ -18,10 +20,20 @@ def _word_pattern(word: str) -> str:
 
 
 def _compile_pattern(words: list[str]) -> re.Pattern[str] | None:
+    global _pattern_cache_key, _pattern_cache
+
     clean_words = [word.strip().lower() for word in words if word.strip()]
+    cache_key = tuple(clean_words)
+    if cache_key == _pattern_cache_key:
+        return _pattern_cache
+
+    _pattern_cache_key = cache_key
     if not clean_words:
+        _pattern_cache = None
         return None
-    return re.compile("|".join(_word_pattern(word) for word in clean_words), re.IGNORECASE)
+
+    _pattern_cache = re.compile("|".join(_word_pattern(word) for word in clean_words), re.IGNORECASE)
+    return _pattern_cache
 
 
 async def delete_if_blacklisted(message: discord.Message, store: SettingsStore) -> bool:

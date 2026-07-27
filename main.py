@@ -7,6 +7,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from auto_delete import AutoDeleteService
+from auto_responder import send_auto_response
 from blacklisted_words import delete_if_blacklisted
 from member_counter import MemberCounterService
 from settings_channel_guard import delete_non_bot_settings_message
@@ -31,17 +32,13 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 settings_store = SettingsStore()
 auto_delete_service = AutoDeleteService(bot, settings_store)
 member_counter_service = MemberCounterService(bot, settings_store)
-settings_panel = SettingsPanel(
-    bot,
-    settings_store,
-    auto_delete_service,
-    member_counter_service,
-)
-bot.add_view(settings_panel.view)
+settings_panel: SettingsPanel | None = None
+bootstrapped = False
 
 
 @bot.event
 async def on_ready():
+    global bootstrapped, settings_panel
     try:
         commits = subprocess.check_output(
             ["git", "rev-list", "--count", "HEAD"],
@@ -54,11 +51,22 @@ async def on_ready():
         status=discord.Status.online,
         activity=discord.Game(f"version {commits}"),
     )
-    await bot.tree.sync()
-    auto_delete_service.start()
-    member_counter_service.start()
-    await settings_panel.ensure_panel()
-    await member_counter_service.update_all()
+
+    if not bootstrapped:
+        settings_panel = SettingsPanel(
+            bot,
+            settings_store,
+            auto_delete_service,
+            member_counter_service,
+        )
+        bot.add_view(settings_panel.view)
+        await bot.tree.sync()
+        auto_delete_service.start()
+        member_counter_service.start()
+        await settings_panel.ensure_panel()
+        await member_counter_service.update_all()
+        bootstrapped = True
+
     logger.info("Logged in as %s (%s)", bot.user, bot.user.id)
 
 
@@ -84,12 +92,18 @@ async def on_message(message: discord.Message):
     if await delete_if_blacklisted(message, settings_store):
         return
 
-    await auto_delete_service.maybe_cleanup_for_message(message)
+    await send_auto_response(message, settings_store)
+    auto_delete_service.schedule_cleanup_for_message(message)
     await bot.process_commands(message)
 
 
-token = os.getenv("TOKEN")
-if not token:
-    raise RuntimeError("TOKEN is not set.")
+def main():
+    token = os.getenv("TOKEN")
+    if not token:
+        raise RuntimeError("TOKEN is not set.")
 
-bot.run(token)
+    bot.run(token)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import logging
 import time
@@ -11,7 +12,7 @@ from settings_store import SettingsStore, duration_from_time_value
 logger = logging.getLogger("auto_delete")
 
 MAX_DELETES_PER_RUN = 200
-MESSAGE_TRIGGER_COOLDOWN_SECONDS = 60
+MESSAGE_TRIGGER_COOLDOWN_SECONDS = 300
 
 
 class AutoDeleteService:
@@ -19,12 +20,14 @@ class AutoDeleteService:
         self.bot = bot
         self.store = store
         self._last_message_cleanup: dict[int, float] = {}
+        self._cleanup_locks: dict[int, asyncio.Lock] = {}
+        self._background_tasks: set[asyncio.Task] = set()
 
     def start(self) -> None:
         if not self.cleanup_loop.is_running():
             self.cleanup_loop.start()
 
-    async def maybe_cleanup_for_message(self, message: discord.Message) -> None:
+    def schedule_cleanup_for_message(self, message: discord.Message) -> None:
         if message.author.bot:
             return
 
@@ -37,7 +40,19 @@ class AutoDeleteService:
         if now - last_run < MESSAGE_TRIGGER_COOLDOWN_SECONDS:
             return
         self._last_message_cleanup[message.channel.id] = now
-        await self.cleanup_rule(rule)
+        self.schedule_cleanup_rule(rule)
+
+    def schedule_cleanup_rule(self, rule: dict) -> asyncio.Task | None:
+        try:
+            task = asyncio.create_task(self.cleanup_rule(dict(rule)))
+        except RuntimeError:
+            logger.exception("Could not schedule auto-delete cleanup.")
+            return None
+
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        task.add_done_callback(self._log_task_exception)
+        return task
 
     async def cleanup_all(self) -> None:
         for rule in self.store.auto_delete_rules():
@@ -47,6 +62,21 @@ class AutoDeleteService:
         channel_id = int(rule.get("channel_id", 0))
         if not channel_id:
             return
+
+        lock = self._cleanup_locks.setdefault(channel_id, asyncio.Lock())
+        if lock.locked():
+            logger.info("Auto-delete cleanup for %s is already running; skipping duplicate run.", channel_id)
+            return
+
+        async with lock:
+            try:
+                await self._cleanup_rule_unlocked(channel_id, rule)
+            except discord.Forbidden:
+                logger.warning("Missing permission to auto-delete in %s.", channel_id)
+            except discord.HTTPException:
+                logger.exception("Discord API error during auto-delete cleanup in %s.", channel_id)
+
+    async def _cleanup_rule_unlocked(self, channel_id: int, rule: dict) -> None:
 
         channel = self.bot.get_channel(channel_id)
         if channel is None:
@@ -60,9 +90,9 @@ class AutoDeleteService:
             logger.warning("Auto-delete target %s does not support message history.", channel_id)
             return
 
-        candidates: dict[int, discord.Message] = {}
         time_value = rule.get("time")
         amount = rule.get("amount")
+        deleted_count = 0
 
         if time_value:
             try:
@@ -70,11 +100,14 @@ class AutoDeleteService:
             except ValueError:
                 logger.warning("Skipping invalid auto-delete time value %r.", time_value)
             else:
-                async for old_message in channel.history(before=cutoff, limit=MAX_DELETES_PER_RUN):
-                    if not old_message.pinned:
-                        candidates[old_message.id] = old_message
-                    if len(candidates) >= MAX_DELETES_PER_RUN:
-                        break
+                deleted = await channel.purge(
+                    limit=MAX_DELETES_PER_RUN,
+                    before=cutoff,
+                    check=lambda message: not message.pinned,
+                    bulk=True,
+                    reason="Auto-delete time rule",
+                )
+                deleted_count += len(deleted)
 
         if amount:
             try:
@@ -84,26 +117,24 @@ class AutoDeleteService:
 
         if amount:
             seen_unpinned = 0
-            history_limit = amount + MAX_DELETES_PER_RUN
-            async for history_message in channel.history(limit=history_limit):
-                if history_message.pinned:
-                    continue
-                seen_unpinned += 1
-                if seen_unpinned >= amount:
-                    candidates[history_message.id] = history_message
-                if len(candidates) >= MAX_DELETES_PER_RUN:
-                    break
-
-        for message in candidates.values():
-            try:
-                await message.delete()
-            except discord.NotFound:
-                pass
-            except discord.Forbidden:
-                logger.warning("Missing permission to auto-delete in %s.", channel_id)
+            remaining_deletes = MAX_DELETES_PER_RUN - deleted_count
+            if remaining_deletes <= 0:
                 return
-            except discord.HTTPException:
-                logger.exception("Failed to auto-delete message %s in %s.", message.id, channel_id)
+            history_limit = amount + remaining_deletes - 1
+
+            def should_delete_excess_message(message: discord.Message) -> bool:
+                nonlocal seen_unpinned
+                if message.pinned:
+                    return False
+                seen_unpinned += 1
+                return seen_unpinned >= amount
+
+            await channel.purge(
+                limit=history_limit,
+                check=should_delete_excess_message,
+                bulk=True,
+                reason="Auto-delete amount rule",
+            )
 
     def _rule_for_channel(self, channel_id: int) -> dict | None:
         for rule in self.store.auto_delete_rules():
@@ -118,3 +149,14 @@ class AutoDeleteService:
     @cleanup_loop.before_loop
     async def before_cleanup_loop(self) -> None:
         await self.bot.wait_until_ready()
+
+    @staticmethod
+    def _log_task_exception(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exception = task.exception()
+        if exception is not None:
+            logger.error(
+                "Background auto-delete cleanup failed.",
+                exc_info=(type(exception), exception, exception.__traceback__),
+            )

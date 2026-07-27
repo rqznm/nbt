@@ -1,6 +1,7 @@
 import copy
 import json
 import re
+from datetime import UTC, datetime
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,8 @@ DEFAULT_SETTINGS = {
         "channel_id": DEFAULT_WELCOME_CHANNEL_ID,
         "message": "welcome to necro's server {mention}",
     },
+    "suggestions": [],
+    "auto_responses": [],
 }
 
 TIME_VALUE_RE = re.compile(r"^(\d+)([hdw])$", re.IGNORECASE)
@@ -112,6 +115,15 @@ def parse_blacklisted_words(value: str) -> list[str]:
     return words
 
 
+def normalize_keyword(value: str) -> str:
+    keyword = value.strip().lower()
+    if not keyword:
+        raise ValueError("Keyword cannot be empty.")
+    if len(keyword) > 100:
+        raise ValueError("Keyword must be 100 characters or less.")
+    return keyword
+
+
 class SettingsStore:
     def __init__(self, path: str | Path = "bot_settings.json"):
         self.path = Path(path)
@@ -199,3 +211,56 @@ class SettingsStore:
             "message": message,
         }
         self.save()
+
+    def suggestions(self) -> list[dict[str, Any]]:
+        return list(self._data.get("suggestions", []))
+
+    def add_suggestion(
+        self,
+        author_id: int,
+        author_name: str,
+        suggestion: str,
+        guild_id: int | None,
+        channel_id: int | None,
+    ) -> None:
+        suggestions = self.suggestions()
+        suggestions.append(
+            {
+                "author_id": int(author_id),
+                "author_name": author_name,
+                "guild_id": int(guild_id) if guild_id else None,
+                "channel_id": int(channel_id) if channel_id else None,
+                "suggestion": suggestion,
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        self._data["suggestions"] = suggestions
+        self.save()
+
+    def auto_responses(self) -> list[dict[str, str]]:
+        return list(self._data.get("auto_responses", []))
+
+    def upsert_auto_response(self, keyword: str, response: str | None) -> str:
+        normalized_keyword = normalize_keyword(keyword)
+        rules = []
+        for rule in self.auto_responses():
+            try:
+                existing_keyword = normalize_keyword(str(rule.get("keyword", "")))
+            except ValueError:
+                continue
+            if existing_keyword != normalized_keyword:
+                rules.append(rule)
+
+        cleaned_response = (response or "").strip()
+        if not cleaned_response:
+            self._data["auto_responses"] = rules
+            self.save()
+            return "removed"
+
+        if len(cleaned_response) > 1800:
+            raise ValueError("Response must be 1800 characters or less.")
+
+        rules.append({"keyword": normalized_keyword, "response": cleaned_response})
+        self._data["auto_responses"] = rules
+        self.save()
+        return "saved"
