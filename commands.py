@@ -6,29 +6,8 @@ from discord.ext import commands
 
 logger = logging.getLogger("necro_bot")
 
-_STATUS_EMOJI = {
-    discord.Status.online: "🟢",
-    discord.Status.idle: "🌙",
-    discord.Status.dnd: "⛔",
-    discord.Status.offline: "⚪",
-    discord.Status.invisible: "⚪",
-}
-
-_FLAG_LABELS = (
-    ("staff", "Discord Staff"),
-    ("partner", "Partnered Server Owner"),
-    ("hypesquad", "HypeSquad Events"),
-    ("hypesquad_bravery", "HypeSquad Bravery"),
-    ("hypesquad_brilliance", "HypeSquad Brilliance"),
-    ("hypesquad_balance", "HypeSquad Balance"),
-    ("bug_hunter", "Bug Hunter"),
-    ("bug_hunter_level_2", "Bug Hunter (Level 2)"),
-    ("early_supporter", "Early Supporter"),
-    ("verified_bot_developer", "Early Verified Bot Developer"),
-    ("active_developer", "Active Developer"),
-    ("discord_certified_moderator", "Certified Moderator"),
-)
-
+# (permission attribute, display label) — a curated subset of the perms
+# that matter most for a quick moderation-relevant glance at a member.
 _NOTABLE_PERMS = (
     ("administrator", "Administrator"),
     ("manage_guild", "Manage Server"),
@@ -50,8 +29,13 @@ def _dt_to_timestamp(dt) -> str:
     return f"<t:{unix}:F> (<t:{unix}:R>)"
 
 
-def _user_badges(flags: discord.PublicUserFlags) -> list[str]:
-    return [label for attr, label in _FLAG_LABELS if getattr(flags, attr, False)]
+def _ordinal(n: int) -> str:
+    """Render 1 -> '1st', 2 -> '2nd', 3 -> '3rd', 11 -> '11th', etc."""
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
 
 
 def _notable_permissions(perms: discord.Permissions) -> list[str]:
@@ -136,6 +120,8 @@ class InfoCommands(commands.Cog):
         member = member or interaction.user
         await interaction.response.defer()
 
+        # Member/User objects from cache/interactions don't carry banner data;
+        # fetching gives us that extra bit of flair if the user has one set.
         banner_url = None
         try:
             full_user = await self.bot.fetch_user(member.id)
@@ -152,10 +138,6 @@ class InfoCommands(commands.Cog):
 
         embed.add_field(name="ID", value=str(member.id), inline=True)
         embed.add_field(name="Bot Account", value="Yes" if member.bot else "No", inline=True)
-        status_emoji = _STATUS_EMOJI.get(member.status, "⚪")
-        embed.add_field(
-            name="Status", value=f"{status_emoji} {member.status.name.title()}", inline=True
-        )
 
         embed.add_field(name="Account Created", value=_dt_to_timestamp(member.created_at), inline=False)
 
@@ -163,7 +145,7 @@ class InfoCommands(commands.Cog):
             joined_value = _dt_to_timestamp(member.joined_at)
             position = _join_position(member)
             if position:
-                joined_value += f"\n({position:,} to join this server)"
+                joined_value += f"\n({_ordinal(position)} to join this server)"
             embed.add_field(name="Joined Server", value=joined_value, inline=False)
 
         if member.premium_since:
@@ -192,19 +174,14 @@ class InfoCommands(commands.Cog):
 
         notable_perms = _notable_permissions(member.guild_permissions)
         embed.add_field(
-            name="Key Permissions",
+            name="Permissions",
             value=", ".join(notable_perms) if notable_perms else "None",
             inline=False,
         )
 
-        badges = _user_badges(member.public_flags)
-        if badges:
-            embed.add_field(name="Badges", value=", ".join(badges), inline=False)
-
         if member.voice and member.voice.channel:
             embed.add_field(name="In Voice Channel", value=member.voice.channel.mention, inline=True)
 
-        embed.set_footer(text=f"Requested by {interaction.user}")
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="server", description="Show diagnostic info about this server.")
@@ -223,6 +200,8 @@ class InfoCommands(commands.Cog):
             try:
                 await guild.chunk()
             except (discord.ClientException, discord.HTTPException):
+                # Missing the members intent, or Discord refused the request.
+                # We just fall back to the member_count total below.
                 pass
 
         embed = discord.Embed(
@@ -279,7 +258,6 @@ class InfoCommands(commands.Cog):
 
         embed.add_field(name="Features", value=_format_features(guild.features), inline=False)
 
-        embed.set_footer(text=f"Requested by {interaction.user}")
         await interaction.followup.send(embed=embed)
 
     @user.error
