@@ -58,7 +58,7 @@ def _role_level(member: discord.Member) -> str:
     guild = member.guild
     total = len(guild.roles)
     rank_from_top = total - member.top_role.position
-    return f"{_ordinal(rank_from_top)}/{total})"
+    return f"{_ordinal(rank_from_top)} highest"
 
 
 class InfoCommands(commands.Cog):
