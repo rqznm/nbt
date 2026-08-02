@@ -58,6 +58,15 @@ def _join_position(member: discord.Member) -> int | None:
         return None
 
 
+def _role_level(member: discord.Member) -> str:
+    """Describe how high the member's top role sits in the guild's
+    hierarchy, e.g. '3rd highest (of 12 roles)'."""
+    guild = member.guild
+    total = len(guild.roles)
+    rank_from_top = total - member.top_role.position
+    return f"{_ordinal(rank_from_top)} highest (of {total} roles)"
+
+
 class InfoCommands(commands.Cog):
     """Slash commands for viewing diagnostic info about members and the server."""
 
@@ -121,9 +130,7 @@ class InfoCommands(commands.Cog):
             )
 
         embed.add_field(name="Top Role", value=member.top_role.mention, inline=True)
-        embed.add_field(
-            name="Role Count", value=str(max(len(member.roles) - 1, 0)), inline=True
-        )
+        embed.add_field(name="Role Level", value=_role_level(member), inline=True)
 
         roles = [r.mention for r in reversed(member.roles) if not r.is_default()]
         if roles:
