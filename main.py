@@ -13,7 +13,6 @@ from member_counter import MemberCounterService
 from settings_channel_guard import delete_non_bot_settings_message
 from settings_panel import SettingsPanel
 from settings_store import SettingsStore
-from sticky_reaction_channel import StickyReactionChannelService
 from temp_voice import TempVoiceService
 from welcome import send_welcome
 
@@ -36,7 +35,6 @@ settings_store = SettingsStore()
 auto_delete_service = AutoDeleteService(bot, settings_store)
 member_counter_service = MemberCounterService(bot, settings_store)
 temp_voice_service = TempVoiceService(bot)
-sticky_reaction_channel_service = StickyReactionChannelService(bot)
 settings_panel: SettingsPanel | None = None
 bootstrapped = False
 
@@ -72,7 +70,6 @@ async def on_ready():
         await settings_panel.ensure_panel()
         await member_counter_service.update_all()
         await temp_voice_service.start()
-        await sticky_reaction_channel_service.ensure_initial_sticky()
         bootstrapped = True
 
     logger.info("Logged in as %s (%s)", bot.user, bot.user.id)
@@ -104,9 +101,6 @@ async def on_message(message: discord.Message):
         return
 
     if await delete_non_bot_settings_message(message):
-        return
-
-    if await sticky_reaction_channel_service.handle_message(message):
         return
 
     if await delete_if_blacklisted(message, settings_store):
