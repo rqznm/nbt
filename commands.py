@@ -58,46 +58,6 @@ def _join_position(member: discord.Member) -> int | None:
         return None
 
 
-def _count_member_types(guild: discord.Guild) -> tuple[int, int]:
-    """Return (humans, bots) from the cached member list, if available."""
-    if not guild.chunked:
-        return (0, 0)
-    bots = sum(1 for m in guild.members if m.bot)
-    return len(guild.members) - bots, bots
-
-
-def _channel_counts(guild: discord.Guild) -> dict[str, int]:
-    counts = {
-        "text": 0,
-        "announcement": 0,
-        "voice": 0,
-        "stage": 0,
-        "category": 0,
-        "forum": 0,
-    }
-    for channel in guild.channels:
-        if isinstance(channel, discord.CategoryChannel):
-            counts["category"] += 1
-        elif isinstance(channel, discord.StageChannel):
-            counts["stage"] += 1
-        elif isinstance(channel, discord.ForumChannel):
-            counts["forum"] += 1
-        elif isinstance(channel, discord.VoiceChannel):
-            counts["voice"] += 1
-        elif isinstance(channel, discord.TextChannel):
-            if channel.is_news():
-                counts["announcement"] += 1
-            else:
-                counts["text"] += 1
-    return counts
-
-
-def _format_features(features: list[str]) -> str:
-    if not features:
-        return "None"
-    return ", ".join(sorted(f.replace("_", " ").title() for f in features))
-
-
 class InfoCommands(commands.Cog):
     """Slash commands for viewing diagnostic info about members and the server."""
 
@@ -185,7 +145,6 @@ class InfoCommands(commands.Cog):
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="server", description="Show diagnostic info about this server.")
-    @app_commands.checks.cooldown(1, 15.0)
     async def server(self, interaction: discord.Interaction):
         if interaction.guild is None:
             await interaction.response.send_message(
@@ -196,17 +155,8 @@ class InfoCommands(commands.Cog):
         guild = interaction.guild
         await interaction.response.defer()
 
-        if not guild.chunked:
-            try:
-                await guild.chunk()
-            except (discord.ClientException, discord.HTTPException):
-                # Missing the members intent, or Discord refused the request.
-                # We just fall back to the member_count total below.
-                pass
-
         embed = discord.Embed(
             title=f"Server Info — {guild.name}",
-            description=guild.description,
             color=discord.Color.blurple(),
         )
         if guild.icon:
@@ -219,44 +169,9 @@ class InfoCommands(commands.Cog):
         embed.add_field(name="Owner", value=owner_mention, inline=True)
         embed.add_field(name="Created", value=_dt_to_timestamp(guild.created_at), inline=False)
 
-        humans, bots = _count_member_types(guild)
-        member_value = f"Total: {guild.member_count:,}"
-        if guild.chunked:
-            member_value += f"\nHumans: {humans:,} | Bots: {bots:,}"
-        embed.add_field(name="Members", value=member_value, inline=True)
-
-        counts = _channel_counts(guild)
-        channel_value = (
-            f"Text: {counts['text']} | Announcement: {counts['announcement']}\n"
-            f"Voice: {counts['voice']} | Stage: {counts['stage']}\n"
-            f"Category: {counts['category']} | Forum: {counts['forum']}"
-        )
-        embed.add_field(name="Channels", value=channel_value, inline=True)
-
+        embed.add_field(name="Members", value=f"{guild.member_count:,}", inline=True)
+        embed.add_field(name="Channels", value=str(len(guild.channels)), inline=True)
         embed.add_field(name="Roles", value=str(len(guild.roles)), inline=True)
-        embed.add_field(
-            name="Emojis", value=f"{len(guild.emojis)} / {guild.emoji_limit}", inline=True
-        )
-        embed.add_field(
-            name="Stickers", value=f"{len(guild.stickers)} / {guild.sticker_limit}", inline=True
-        )
-
-        embed.add_field(
-            name="Boost Status",
-            value=f"Level {guild.premium_tier} — {guild.premium_subscription_count:,} boosts",
-            inline=True,
-        )
-        embed.add_field(
-            name="Verification Level", value=guild.verification_level.name.title(), inline=True
-        )
-        embed.add_field(
-            name="Content Filter",
-            value=guild.explicit_content_filter.name.replace("_", " ").title(),
-            inline=True,
-        )
-        embed.add_field(name="NSFW Level", value=guild.nsfw_level.name.title(), inline=True)
-
-        embed.add_field(name="Features", value=_format_features(guild.features), inline=False)
 
         await interaction.followup.send(embed=embed)
 
@@ -265,13 +180,6 @@ class InfoCommands(commands.Cog):
     async def info_error_handler(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
     ):
-        if isinstance(error, app_commands.CommandOnCooldown):
-            await interaction.response.send_message(
-                f"That command is on cooldown. Try again in {error.retry_after:.1f}s.",
-                ephemeral=True,
-            )
-            return
-
         logger.exception("Unhandled error in info command.", exc_info=error)
         if interaction.response.is_done():
             await interaction.followup.send(
