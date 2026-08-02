@@ -172,8 +172,11 @@ class InfoCommands(commands.Cog):
             embed.set_image(url=guild.banner.url)
 
         embed.add_field(name="ID", value=str(guild.id), inline=True)
-        owner_mention = guild.owner.mention if guild.owner else f"<@{guild.owner_id}>"
-        embed.add_field(name="Owner", value=owner_mention, inline=True)
+        embed.add_field(
+            name="Boost Level",
+            value=f"Level {guild.premium_tier} ({guild.premium_subscription_count:,} boosts)",
+            inline=True,
+        )
         embed.add_field(name="Created", value=_dt_to_timestamp(guild.created_at), inline=False)
 
         embed.add_field(name="Members", value=f"{guild.member_count:,}", inline=True)
