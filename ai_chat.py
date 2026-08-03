@@ -229,7 +229,7 @@ class AIChatService:
 
         if self._llm is None:
             await message.reply(
-                "⏳ rena ai is still loading the model — try again in a bit.",
+                "",
                 mention_author=True,
             )
             return
