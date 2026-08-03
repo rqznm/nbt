@@ -244,8 +244,7 @@ class AIChatService:
 
         if message.author.id in self._pending_users:
             await message.reply(
-                "⏳ You already have a response in progress here — please wait "
-                "for it to finish before sending another prompt.",
+                "",
                 mention_author=True,
             )
             return
