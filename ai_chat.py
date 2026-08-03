@@ -2,32 +2,46 @@
 ai_chat.py
 ==========
 
-Routes every user message posted in one specific channel to a locally
-hosted llama.cpp server running:
-
+Runs
     DavidAU/Qwen3.6-27B-Fable-Fusion-711-Uncensored-Heretic-NM-DAU-NEO-MAX-MTP-GGUF
+directly inside this process via llama-cpp-python. No separate server —
+just this file plus the pip package.
 
-and turns the reply into three edits of a single Discord message:
+Routes every user message posted in one specific channel to the model and
+turns the reply into three edits of a single Discord message:
 
     1. "rena ai is thinking..."                      (sent immediately)
     2. the model's live <think>...</think> reasoning  (edited in, plaintext)
     3. the final answer only, thinking text removed   (last edit)
 
-Every request is stateless: only the triggering message's own text is
-sent to the model. Nothing is stored or replayed across messages.
+Every request is stateless: only the triggering message's own text is sent
+to the model. Nothing is stored or replayed across messages.
 
 --------------------------------------------------------------------------
-REQUIRED: a llama.cpp server must already be running and reachable at
-LLAMA_SERVER_URL below. This module is only the Discord-facing half.
-See setup_llama_server.sh for building llama.cpp, downloading a GGUF
-quant of the model, and running it as a systemd service.
+ONE-TIME SETUP on the VPS, inside your venv:
 
-IMPORTANT — hardware note for the vps-f9eebf0d.vps.ovh.net box (4 vCores /
-8 GB RAM): the smallest quant of this 27B model is ~11.7 GB on its own,
-which does not fit in 8 GB of RAM. Do not expect this to run until the
-VPS has at least 16 GB RAM (bare minimum, smallest quant only) — 24-32 GB
-is recommended. See setup_llama_server.sh for details. Running it as-is
-on 8 GB will fail to load or crash into swap.
+    sudo apt install -y cmake build-essential
+    pip install llama-cpp-python huggingface_hub
+
+(llama-cpp-python has no prebuilt CPU wheel on PyPI, so this compiles the
+C++ core locally — takes a few minutes, only needed once.)
+
+The FIRST time the bot starts, AIChatService.start() will download the
+GGUF file (~11.7 GB for the smallest quant) from Hugging Face into
+~/.cache/huggingface and load it into RAM before the bot finishes
+connecting. That download is cached on disk afterwards, but the RAM load
+itself happens again on every restart, since the model now lives inside
+this same process instead of a separate long-running server.
+
+HARDWARE NOTE (vps-f9eebf0d.vps.ovh.net — 4 vCores / 8 GB RAM): the
+smallest available quant of this model is 11.7 GB on its own — more than
+this box's total RAM. Expect the load to fail outright or get OOM-killed
+on 8 GB. Because the model now runs inside the bot's own process, if
+that happens it takes the whole bot down with it, not just this one
+feature. This file logs a warning at startup if it detects <16 GB RAM,
+but it does not stop you from trying anyway. Realistic fix: resize the
+VPS to at least 16 GB (24-32 GB is comfortable), or point MODEL_REPO /
+MODEL_FILE below at a smaller model that actually fits.
 --------------------------------------------------------------------------
 """
 
@@ -35,14 +49,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-import aiohttp
 import discord
 from discord.ext import commands
+from llama_cpp import Llama
 
 logger = logging.getLogger("necro_bot.ai_chat")
 
@@ -53,9 +67,15 @@ logger = logging.getLogger("necro_bot.ai_chat")
 # Only messages in this channel are treated as prompts.
 AI_CHANNEL_ID = 1533667198575575120
 
-# Local llama.cpp server (OpenAI-compatible /v1/chat/completions endpoint).
-LLAMA_SERVER_URL = "http://127.0.0.1:8080/v1/chat/completions"
-MODEL_NAME = "DavidAU/Qwen3.6-27B-Fable-Fusion-711-Uncensored-Heretic-NM-DAU-NEO-MAX-MTP-GGUF"
+MODEL_REPO = "DavidAU/Qwen3.6-27B-Fable-Fusion-711-Uncensored-Heretic-NM-DAU-NEO-MAX-MTP-GGUF"
+# Smallest quant on the repo (still 11.7 GB) — see module docstring above.
+MODEL_FILE = "Qwen3.6-27B-Fable-Fus-711-UnHeretic-NM-DAU-NEO-MAX-NEO-IQ2_M.gguf"
+
+N_CTX = 4096          # context window; kept modest to control RAM use
+N_THREADS = 4         # matches the VPS's 4 vCores
+N_GPU_LAYERS = 0       # no GPU on this box — pure CPU inference
+
+_MIN_RECOMMENDED_RAM_GB = 16
 
 SYSTEM_PROMPT = (
     "You are rena ai, a helpful assistant replying in a Discord server. "
@@ -65,11 +85,6 @@ SYSTEM_PROMPT = (
 
 THINKING_LABEL = "🧠 **rena ai is thinking...**"
 
-# CPU inference of a 27B model is heavy. Keep this at 1 — running two
-# generations at once on a 4-core box just makes both of them slower,
-# it doesn't get you real parallelism.
-MAX_CONCURRENT_GENERATIONS = 1
-
 # Overall queue depth before new prompts get told to back off.
 MAX_QUEUE_SIZE = 20
 
@@ -78,9 +93,21 @@ EDIT_INTERVAL_SECONDS = 1.5
 
 DISCORD_MESSAGE_LIMIT = 2000
 
-# Sampling / generation params sent to the model.
+# Sampling / generation params.
 REQUEST_TEMPERATURE = 0.7
 REQUEST_MAX_TOKENS = 4096
+
+
+def _total_ram_gb() -> float | None:
+    """Best-effort total system RAM in GB (Linux only, stdlib only)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / (1024 * 1024)
+    except OSError:
+        pass
+    return None
 
 
 @dataclass
@@ -95,9 +122,8 @@ class ResponseAssembler:
     `answer` text.
 
     Works two ways:
-      - If the server sends a separate `reasoning_content` delta field
-        (newer llama.cpp builds with --reasoning-format do this), that is
-        used directly.
+      - If a `reasoning_content` delta field is present (some setups emit
+        this natively), it's used directly.
       - Otherwise, raw `content` text is scanned for inline
         <think>...</think> tags (the default for Qwen3-style thinking
         models) and split accordingly, even if a tag is split across two
@@ -116,7 +142,6 @@ class ResponseAssembler:
 
     def feed_content(self, piece: str) -> None:
         if self._native_reasoning:
-            # Server already separated reasoning out for us.
             self.answer += piece
             return
         self._raw += piece
@@ -127,8 +152,6 @@ class ResponseAssembler:
         lower = text.lower()
         think_start = lower.find("<think>")
         if think_start == -1:
-            # Model never opened a think block (or isn't a thinking model) —
-            # treat everything as the answer.
             self.answer = text
             return
         content_start = think_start + len("<think>")
@@ -142,35 +165,57 @@ class ResponseAssembler:
 
 
 class AIChatService:
-    """Owns the request queue, the HTTP session to llama.cpp, and the
-    single background worker that turns prompts into edited replies."""
+    """Owns the loaded model, the request queue, and the single background
+    worker that turns prompts into edited replies."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self._queue: asyncio.Queue[Job] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
         self._pending_users: set[int] = set()
-        self._session: aiohttp.ClientSession | None = None
-        self._workers: list[asyncio.Task] = []
+        self._llm: Llama | None = None
+        self._worker_task: asyncio.Task | None = None
+        # One worker thread total: this guarantees the model load and every
+        # single generation run strictly one at a time. CPU inference of a
+        # 27B model doesn't get faster by overlapping calls on a 4-core
+        # box — it just makes every request slower.
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rena-llm")
 
     async def start(self) -> None:
-        if self._session is not None:
+        if self._llm is not None or self._worker_task is not None:
             return  # already started
-        self._session = aiohttp.ClientSession()
-        self._workers = [
-            asyncio.create_task(self._worker_loop())
-            for _ in range(MAX_CONCURRENT_GENERATIONS)
-        ]
-        logger.info("AIChatService started (%d worker(s))", len(self._workers))
+
+        ram = _total_ram_gb()
+        if ram is not None and ram < _MIN_RECOMMENDED_RAM_GB:
+            logger.warning(
+                "Only ~%.1fGB RAM detected. %s alone is ~11.7GB — the model "
+                "load may fail or the whole bot process may get OOM-killed. "
+                "See the top of ai_chat.py for options.",
+                ram, MODEL_FILE,
+            )
+
+        logger.info("Loading %s — this can take a while and a lot of RAM...", MODEL_FILE)
+        loop = asyncio.get_running_loop()
+        self._llm = await loop.run_in_executor(self._executor, self._load_model)
+        logger.info("Model loaded, rena ai is ready.")
+
+        self._worker_task = asyncio.create_task(self._worker_loop())
+
+    def _load_model(self) -> Llama:
+        return Llama.from_pretrained(
+            repo_id=MODEL_REPO,
+            filename=MODEL_FILE,
+            n_ctx=N_CTX,
+            n_threads=N_THREADS,
+            n_gpu_layers=N_GPU_LAYERS,
+            verbose=False,
+        )
 
     async def close(self) -> None:
-        for task in self._workers:
-            task.cancel()
-        for task in self._workers:
+        if self._worker_task is not None:
+            self._worker_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await task
-        if self._session is not None:
-            await self._session.close()
-            self._session = None
+                await self._worker_task
+        self._executor.shutdown(wait=False)
 
     # ------------------------------------------------------------------
     # Entry point called from on_message
@@ -180,6 +225,13 @@ class AIChatService:
         if message.channel.id != AI_CHANNEL_ID:
             return
         if message.author.bot:
+            return
+
+        if self._llm is None:
+            await message.reply(
+                "⏳ rena ai is still loading the model — try again in a bit.",
+                mention_author=True,
+            )
             return
 
         content = message.content.strip()
@@ -264,53 +316,67 @@ class AIChatService:
             logger.exception("AI generation failed for message %s", job.message.id)
             await self._safe_edit(
                 placeholder,
-                "⚠️ rena ai couldn't generate a response — the model server may "
-                "be unreachable or overloaded. Please try again shortly.",
+                "⚠️ rena ai hit an error generating a response. Please try again.",
             )
 
     # ------------------------------------------------------------------
-    # llama.cpp streaming call
+    # In-process model call, bridged onto the asyncio event loop
     # ------------------------------------------------------------------
 
     async def _stream_completion(self, prompt: str):
-        assert self._session is not None, "AIChatService.start() was never called"
+        """
+        llama-cpp-python's create_chat_completion(stream=True) is a
+        blocking, synchronous generator (each `next()` call blocks the
+        calling thread while the model computes the next token). To avoid
+        freezing the bot's event loop (and Discord's heartbeat) while that
+        runs, the generator is driven from a background thread, and each
+        chunk is handed back to the event loop via a thread-safe queue.
+        """
+        assert self._llm is not None, "AIChatService.start() was never called"
+        loop = asyncio.get_running_loop()
+        q: asyncio.Queue = asyncio.Queue()
+        DONE = object()
 
-        payload = {
-            "model": MODEL_NAME,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            "stream": True,
-            "temperature": REQUEST_TEMPERATURE,
-            "max_tokens": REQUEST_MAX_TOKENS,
-        }
+        def producer() -> None:
+            try:
+                stream = self._llm.create_chat_completion(
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    stream=True,
+                    temperature=REQUEST_TEMPERATURE,
+                    max_tokens=REQUEST_MAX_TOKENS,
+                )
+                for chunk in stream:
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    reasoning_piece = delta.get("reasoning_content")
+                    content_piece = delta.get("content")
+                    if reasoning_piece:
+                        loop.call_soon_threadsafe(q.put_nowait, ("reasoning", reasoning_piece))
+                    if content_piece:
+                        loop.call_soon_threadsafe(q.put_nowait, ("content", content_piece))
+            except Exception as exc:  # surfaced to the consumer below
+                loop.call_soon_threadsafe(q.put_nowait, ("error", exc))
+            finally:
+                loop.call_soon_threadsafe(q.put_nowait, (DONE, None))
 
-        timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=300)
+        future = loop.run_in_executor(self._executor, producer)
 
-        async with self._session.post(LLAMA_SERVER_URL, json=payload, timeout=timeout) as resp:
-            resp.raise_for_status()
-            async for raw_line in resp.content:
-                line = raw_line.decode("utf-8", errors="ignore").strip()
-                if not line.startswith("data:"):
-                    continue
-                data = line[len("data:"):].strip()
-                if data == "[DONE]":
-                    return
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                delta = choices[0].get("delta") or {}
-                reasoning_piece = delta.get("reasoning_content")
-                content_piece = delta.get("content")
-                if reasoning_piece:
-                    yield "reasoning", reasoning_piece
-                if content_piece:
-                    yield "content", content_piece
+        try:
+            while True:
+                kind, payload = await q.get()
+                if kind is DONE:
+                    break
+                if kind == "error":
+                    raise payload
+                yield kind, payload
+        finally:
+            with contextlib.suppress(Exception):
+                await future
 
     # ------------------------------------------------------------------
     # Discord message helpers
